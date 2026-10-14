@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Carrefour intelligent – Supervision</title>
+<style>
+body{margin:0;font-family:system-ui,sans-serif;background:#0f2f27;color:#fff;padding:16px}
+h1{font-size:22px;margin:0 0 10px}
+.chip{display:inline-block;padding:3px 10px;border-radius:12px;background:#555;font-size:13px;margin:0 6px 8px 0}
+.chip.ok{background:#2fbf71}.chip.bad{background:#e74c3c}.chip.warn{background:#f2a93b;color:#000}
+.wrap{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start}
+.card{background:#1b4a3e;border-radius:12px;padding:12px}
+#scene{width:min(560px,92vw);height:auto;display:block;border-radius:8px;background:#2a6b4f}
+.side{min-width:270px;max-width:330px}
+.mini{font-size:13px;color:#bfe6d0;margin:4px 0 10px}
+button{background:#f2a93b;border:0;border-radius:8px;padding:8px 14px;font-weight:bold;cursor:pointer;margin:0 6px 6px 0}
+button:disabled{opacity:.4;cursor:not-allowed}
+#log{list-style:none;padding:0;margin:8px 0 0;font-size:14px}
+#log li{padding:4px 0;border-bottom:1px solid #2f6a5a}
+</style>
+</head>
+<body>
+<h1>Carrefour intelligent – Supervision</h1>
+<div>
+  <span id="c-broker" class="chip bad">serveur : déconnecté</span>
+  <span id="c-carte" class="chip">carte : ?</span>
+  <span id="c-mode" class="chip">mode : ?</span>
+</div>
+<div class="wrap">
+  <div class="card"><svg id="scene" viewBox="0 0 600 600"></svg></div>
+  <div class="card side">
+    <b>Mode test</b>
+    <p class="mini">Réservé (code PIN). Hors mode test, la carte pilote seule le carrefour.</p>
+    <button id="b-test" disabled>Activer le mode test</button>
+    <div>
+      <button class="cmd" data-c="vert" disabled>Tout vert</button>
+      <button class="cmd" data-c="orange" disabled>Tout orange</button>
+      <button class="cmd" data-c="rouge" disabled>Tout rouge</button>
+    </div>
+    <b>Journal</b>
+    <ul id="log"></ul>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<script>
+// ====== À ADAPTER : IDENTIQUE à PREFIXE dans le code de la carte ======
+const P = "carrefour-abredeheu-2026/";
+const BROKER = "wss://broker.emqx.io:8084/mqtt";
+// =====================================================================
+
+const $ = id => document.getElementById(id);
+const col = { vert:"#2ecc71", orange:"#f39c12", rouge:"#e74c3c" };
+const OFF = "#2c2c2c";
+const SVGNS = "http://www.w3.org/2000/svg";
+function el(tag, attrs, parent){
+  const e = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+const BR = {
+  N:{a:0,   nom:"Nord",  cx:300, cy:70},
+  E:{a:90,  nom:"Est",   cx:530, cy:300},
+  S:{a:180, nom:"Sud",   cx:300, cy:530},
+  W:{a:270, nom:"Ouest", cx:70,  cy:300}
+};
+const KEYS = ["N","S","E","W"];
+
+// ---------- Scène (vue du dessus) ----------
+const svg = $("scene");
+el("rect",{x:250,y:0,width:100,height:600,fill:"#3d3d3d"},svg);
+el("rect",{x:0,y:250,width:600,height:100,fill:"#3d3d3d"},svg);
+Object.keys(BR).forEach(k=>{
+  const g = el("g",{transform:`rotate(${BR[k].a} 300 300)`},svg);
+  el("line",{x1:300,y1:0,x2:300,y2:195,stroke:"#ddd","stroke-dasharray":"10 8"},g);
+  el("rect",{x:250,y:245,width:50,height:4,fill:"#fff"},g);
+  for (let i=0;i<6;i++) el("rect",{x:258+14*i,y:206,width:8,height:34,rx:2,fill:"#eee"},g);
+  el("rect",{x:264,y:128,width:22,height:62,rx:6,fill:"#111",stroke:"#666"},g);
+  ["rouge","orange","vert"].forEach((c,i)=>
+    el("circle",{id:`L-${k}-${c}`,cx:275,cy:144+18*i,r:6.5,fill:OFF},g));
+});
+Object.keys(BR).forEach(k=>{
+  const b = BR[k];
+  el("rect",{x:b.cx-38,y:b.cy-14,width:76,height:28,rx:8,fill:"#12372E",opacity:.9,stroke:"#2FBF71"},svg);
+  const t = el("text",{x:b.cx,y:b.cy+5,fill:"#bfe6d0","font-size":14,"text-anchor":"middle"},svg); t.textContent = b.nom;
+});
+function setCar(k, etat){
+  ["rouge","orange","vert"].forEach(c=> $(`L-${k}-${c}`).setAttribute("fill", c===etat ? col[c] : OFF));
+}
+
+// ---------- Interface ----------
+function log(t){
+  const li = document.createElement("li");
+  li.textContent = new Date().toLocaleTimeString() + " – " + t;
+  $("log").prepend(li);
+  while ($("log").children.length > 8) $("log").lastChild.remove();
+}
+function chip(id, txt, cls){ const e = $(id); e.textContent = txt; e.className = "chip " + (cls||""); }
+
+let pin = null, modeCarte = "?", connecte = false, dernier = "", demandeT = 0;
+const monId = Math.random().toString(36).slice(2,8);
+
+function majBoutons(){
+  const actif = !!pin && modeCarte === "test";
+  document.querySelectorAll(".cmd").forEach(b => b.disabled = !actif);
+  $("b-test").textContent = pin ? "Quitter le mode test" : "Activer le mode test";
+  $("b-test").disabled = !connecte;
+}
+function envoyer(o){
+  o.pin = pin; o.id = monId;
+  client.publish(P + "commande", JSON.stringify(o));
+}
+$("b-test").onclick = ()=>{
+  if (pin){ envoyer({mode:"auto"}); pin = null; log("Mode test quitté"); majBoutons(); return; }
+  const p = prompt("Code PIN du mode test :");
+  if (!p) return;
+  pin = p; demandeT = Date.now();
+  envoyer({mode:"test"});
+  log("Demande du mode test…");
+};
+document.querySelectorAll(".cmd").forEach(b=>{
+  b.onclick = ()=>{ envoyer({couleur:b.dataset.c}); log("Commande envoyée : tout " + b.dataset.c); };
+});
+setInterval(()=>{ if (pin && modeCarte === "test") envoyer({mode:"test"}); }, 20000); // garde le mode test actif
+
+// ---------- Messages reçus de la carte ----------
+function majEtat(d){
+  KEYS.forEach(k=>{ if (d[k]) setCar(k, d[k]); });
+  const resume = KEYS.map(k=>d[k]).join(" / ");
+  const m = d.mode === "test" ? "test" : "auto";
+  if (resume + m !== dernier){ dernier = resume + m; log("Feux N/S/E/O : " + resume + " · mode " + m); }
+  modeCarte = m;
+  chip("c-mode", "mode : " + (m==="test" ? "TEST" : "AUTO"), m==="test" ? "warn" : "ok");
+  if (m === "auto" && pin && Date.now() - demandeT > 3000){ pin = null; log("La carte est repassée en mode auto"); }
+  majBoutons();
+}
+function majStatut(d){
+  chip("c-carte", d.en_ligne ? "carte : en ligne" : "carte : hors ligne", d.en_ligne ? "ok" : "bad");
+  log(d.en_ligne ? "Carte connectée" : "Carte hors ligne");
+}
+function majAcces(d){
+  if (d.id !== monId || d.ok) return;
+  pin = null; log("Code PIN REFUSÉ"); majBoutons(); alert("Code PIN refusé");
+}
+
+// ---------- Connexion MQTT ----------
+const client = mqtt.connect(BROKER);
+client.on("connect", ()=>{
+  connecte = true; chip("c-broker", "serveur : connecté", "ok");
+  client.subscribe([P+"etat", P+"statut", P+"acces"]);
+  majBoutons();
+});
+client.on("close", ()=>{ connecte = false; chip("c-broker", "serveur : déconnecté", "bad"); majBoutons(); });
+client.on("message", (topic, payload)=>{
+  let d; try { d = JSON.parse(payload.toString()); } catch(e){ return; }
+  const nom = topic.replace(P, "");
+  if (nom === "etat") majEtat(d);
+  if (nom === "statut") majStatut(d);
+  if (nom === "acces") majAcces(d);
+});
+majBoutons();
+</script>
+</body>
+</html>
