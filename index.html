@@ -5,39 +5,51 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Carrefour intelligent – Supervision</title>
 <style>
+*{box-sizing:border-box}
 body{margin:0;font-family:system-ui,sans-serif;background:#0f2f27;color:#fff;padding:16px}
 h1{font-size:22px;margin:0 0 10px}
-.chip{display:inline-block;padding:3px 10px;border-radius:12px;background:#555;font-size:13px;margin:0 6px 8px 0}
-.chip.ok{background:#2fbf71}.chip.bad{background:#e74c3c}.chip.warn{background:#f2a93b;color:#000}
+.barre{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-bottom:10px}
+.chip{display:inline-block;padding:3px 10px;border-radius:12px;background:#555;font-size:13px}
+.chip.ok{background:#1e8a50}.chip.bad{background:#c0392b}.chip.warn{background:#f2a93b;color:#000}
+.chip.urg{background:#2f6fe0}
+button{background:#f2a93b;color:#000;border:0;border-radius:8px;padding:6px 12px;font-weight:bold;font-size:13px;cursor:pointer;margin-left:auto}
 .wrap{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start}
-.card{background:#1b4a3e;border-radius:12px;padding:12px}
-#scene{width:min(560px,92vw);height:auto;display:block;border-radius:8px;background:#2a6b4f}
-.side{min-width:270px;max-width:330px}
-.mini{font-size:13px;color:#bfe6d0;margin:4px 0 10px}
-button{background:#f2a93b;border:0;border-radius:8px;padding:8px 14px;font-weight:bold;cursor:pointer;margin:0 6px 6px 0}
-button:disabled{opacity:.4;cursor:not-allowed}
+.card{background:#1b4a3e;border-radius:12px;padding:12px;max-width:100%}
+#scene{width:min(640px,calc(100vw - 56px));height:auto;display:block}
+.side{flex:1 1 270px;max-width:360px}
+.legende{list-style:none;padding:0;margin:8px 0 14px;font-size:14px}
+.legende li{display:flex;align-items:center;gap:8px;padding:3px 0}
+.pastille{width:14px;height:14px;border-radius:50%;flex:none}
 #log{list-style:none;padding:0;margin:8px 0 0;font-size:14px}
 #log li{padding:4px 0;border-bottom:1px solid #2f6a5a}
+#log:empty::before{content:"Aucun événement pour l'instant";color:#bfe6d0}
+/* Plein écran : uniquement le carrefour et le bandeau */
+body.plein{padding:8px 12px;height:100vh;height:100dvh;overflow:hidden;display:flex;flex-direction:column}
+body.plein h1,body.plein .side{display:none}
+body.plein .barre{margin-bottom:6px}
+body.plein .wrap{flex:1;min-height:0}
+body.plein .card{background:none;padding:0;width:100%;height:100%}
+body.plein #scene{width:100%;height:100%}
 </style>
 </head>
 <body>
 <h1>Carrefour intelligent – Supervision</h1>
-<div>
+<div class="barre">
   <span id="c-broker" class="chip bad">serveur : déconnecté</span>
   <span id="c-carte" class="chip">carte : ?</span>
   <span id="c-mode" class="chip">mode : ?</span>
+  <button id="b-plein" type="button">Plein écran</button>
 </div>
 <div class="wrap">
-  <div class="card"><svg id="scene" viewBox="0 0 600 600"></svg></div>
+  <div class="card"><svg id="scene" viewBox="0 0 600 600" role="img" aria-label="Vue du dessus du carrefour et état de ses feux"></svg></div>
   <div class="card side">
-    <b>Mode test</b>
-    <p class="mini">Réservé (code PIN). Hors mode test, la carte pilote seule le carrefour.</p>
-    <button id="b-test" disabled>Activer le mode test</button>
-    <div>
-      <button class="cmd" data-c="vert" disabled>Tout vert</button>
-      <button class="cmd" data-c="orange" disabled>Tout orange</button>
-      <button class="cmd" data-c="rouge" disabled>Tout rouge</button>
-    </div>
+    <b>Légende</b>
+    <ul class="legende">
+      <li><span class="pastille" style="background:#e74c3c"></span>Rouge : arrêt</li>
+      <li><span class="pastille" style="background:#f39c12"></span>Orange : feu routier, ou bouton d'appel actif</li>
+      <li><span class="pastille" style="background:#2ecc71"></span>Vert : passage</li>
+      <li><span class="pastille" style="background:#3b82f6"></span>Bleu : axe réservé à l'ambulance</li>
+    </ul>
     <b>Journal</b>
     <ul id="log"></ul>
   </div>
@@ -45,14 +57,16 @@ button:disabled{opacity:.4;cursor:not-allowed}
 
 <script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
 <script>
-// ====== À ADAPTER : IDENTIQUE à PREFIXE dans le code de la carte ======
+// ====== IDENTIQUE à MQTT_PREFIXE dans le code de la carte ======
 const P = "carrefour-abredeheu-2026/";
 const BROKER = "wss://broker.emqx.io:8084/mqtt";
-// =====================================================================
+const DELAI_MUETTE = 15000; // Sans message de la carte pendant ce temps : hors ligne
+// ================================================================
 
 const $ = id => document.getElementById(id);
-const col = { vert:"#2ecc71", orange:"#f39c12", rouge:"#e74c3c" };
+const col = { vert:"#2ecc71", orange:"#f39c12", rouge:"#e74c3c", bleu:"#3b82f6" };
 const OFF = "#2c2c2c";
+const BOUTON_OFF = "#8a8f8c";
 const SVGNS = "http://www.w3.org/2000/svg";
 function el(tag, attrs, parent){
   const e = document.createElementNS(SVGNS, tag);
@@ -69,25 +83,53 @@ const BR = {
 const KEYS = ["N","S","E","W"];
 
 // ---------- Scène (vue du dessus) ----------
+// Chaque bras porte 1 feu routier, 2 feux piétons et 2 boutons d'appel.
+// Vu du centre, _1 et _2 suivent le sens horaire du câblage.
+const COTES = [
+  {n:1, feuX:226, boutonX:213},
+  {n:2, feuX:356, boutonX:387}
+];
 const svg = $("scene");
+el("rect",{x:0,y:0,width:600,height:600,rx:10,fill:"#2a6b4f"},svg);
 el("rect",{x:250,y:0,width:100,height:600,fill:"#3d3d3d"},svg);
 el("rect",{x:0,y:250,width:600,height:100,fill:"#3d3d3d"},svg);
 Object.keys(BR).forEach(k=>{
   const g = el("g",{transform:`rotate(${BR[k].a} 300 300)`},svg);
   el("line",{x1:300,y1:0,x2:300,y2:195,stroke:"#ddd","stroke-dasharray":"10 8"},g);
   el("rect",{x:250,y:245,width:50,height:4,fill:"#fff"},g);
-  for (let i=0;i<6;i++) el("rect",{x:258+14*i,y:206,width:8,height:34,rx:2,fill:"#eee"},g);
+  for (let i=0;i<6;i++) el("rect",{x:261+14*i,y:206,width:8,height:34,rx:2,fill:"#eee"},g);
   el("rect",{x:264,y:128,width:22,height:62,rx:6,fill:"#111",stroke:"#666"},g);
   ["rouge","orange","vert"].forEach((c,i)=>
     el("circle",{id:`L-${k}-${c}`,cx:275,cy:144+18*i,r:6.5,fill:OFF},g));
+  COTES.forEach(cote=>{
+    el("rect",{x:cote.feuX,y:178,width:18,height:34,rx:5,fill:"#111",stroke:"#666"},g);
+    ["rouge","vert"].forEach((c,i)=>
+      el("circle",{id:`P-${k}-${cote.n}-${c}`,cx:cote.feuX+9,cy:187+16*i,r:5.5,fill:OFF},g));
+    el("circle",{id:`B-${k}-${cote.n}`,cx:cote.boutonX,cy:195,r:7,fill:BOUTON_OFF,stroke:"#fff","stroke-width":1.5},g);
+  });
 });
 Object.keys(BR).forEach(k=>{
   const b = BR[k];
   el("rect",{x:b.cx-38,y:b.cy-14,width:76,height:28,rx:8,fill:"#12372E",opacity:.9,stroke:"#2FBF71"},svg);
   const t = el("text",{x:b.cx,y:b.cy+5,fill:"#bfe6d0","font-size":14,"text-anchor":"middle"},svg); t.textContent = b.nom;
 });
-function setCar(k, etat){
-  ["rouge","orange","vert"].forEach(c=> $(`L-${k}-${c}`).setAttribute("fill", c===etat ? col[c] : OFF));
+
+// « bleu » s'affiche sur la lampe verte, comme sur la maquette
+function lampe(id, c, etat){
+  let f = OFF;
+  if (etat === "tout" || etat === c) f = col[c];
+  if (c === "vert" && etat === "bleu") f = col.bleu;
+  $(id).setAttribute("fill", f);
+}
+function setCar(k, etat){ ["rouge","orange","vert"].forEach(c=> lampe(`L-${k}-${c}`, c, etat)); }
+function setPieton(k, etat){
+  [1,2].forEach(n=> ["rouge","vert"].forEach(c=> lampe(`P-${k}-${n}-${c}`, c, etat)));
+}
+function setBouton(k, actif){
+  [1,2].forEach(n=> $(`B-${k}-${n}`).setAttribute("fill", actif ? col.orange : BOUTON_OFF));
+}
+function eteindre(){
+  KEYS.forEach(k=>{ setCar(k,""); setPieton(k,""); setBouton(k,false); });
 }
 
 // ---------- Interface ----------
@@ -99,68 +141,97 @@ function log(t){
 }
 function chip(id, txt, cls){ const e = $(id); e.textContent = txt; e.className = "chip " + (cls||""); }
 
-let pin = null, modeCarte = "?", connecte = false, dernier = "", demandeT = 0;
-const monId = Math.random().toString(36).slice(2,8);
+let enLigne = null;      // null : encore inconnu
+let dernierVivant = 0;   // Dernier message reçu en direct de la carte
+let modePrecedent = "";
+let appelsPrecedents = {};
 
-function majBoutons(){
-  const actif = !!pin && modeCarte === "test";
-  document.querySelectorAll(".cmd").forEach(b => b.disabled = !actif);
-  $("b-test").textContent = pin ? "Quitter le mode test" : "Activer le mode test";
-  $("b-test").disabled = !connecte;
+function marquerCarte(valeur){
+  if (valeur === enLigne) return;
+  const avant = enLigne;
+  enLigne = valeur;
+  chip("c-carte", valeur ? "carte : en ligne" : "carte : hors ligne", valeur ? "ok" : "bad");
+  if (valeur) log("Carte connectée");
+  else {
+    if (avant !== null) log("Carte hors ligne");
+    effacerEtat();
+  }
 }
-function envoyer(o){
-  o.pin = pin; o.id = monId;
-  client.publish(P + "commande", JSON.stringify(o));
+function effacerEtat(){
+  eteindre();
+  chip("c-mode", "mode : ?");
+  modePrecedent = "";
+  appelsPrecedents = {};
 }
-$("b-test").onclick = ()=>{
-  if (pin){ envoyer({mode:"auto"}); pin = null; log("Mode test quitté"); majBoutons(); return; }
-  const p = prompt("Code PIN du mode test :");
-  if (!p) return;
-  pin = p; demandeT = Date.now();
-  envoyer({mode:"test"});
-  log("Demande du mode test…");
-};
-document.querySelectorAll(".cmd").forEach(b=>{
-  b.onclick = ()=>{ envoyer({couleur:b.dataset.c}); log("Commande envoyée : tout " + b.dataset.c); };
-});
-setInterval(()=>{ if (pin && modeCarte === "test") envoyer({mode:"test"}); }, 20000); // garde le mode test actif
 
 // ---------- Messages reçus de la carte ----------
-function majEtat(d){
-  KEYS.forEach(k=>{ if (d[k]) setCar(k, d[k]); });
-  const resume = KEYS.map(k=>d[k]).join(" / ");
-  const m = d.mode === "test" ? "test" : "auto";
-  if (resume + m !== dernier){ dernier = resume + m; log("Feux N/S/E/O : " + resume + " · mode " + m); }
-  modeCarte = m;
-  chip("c-mode", "mode : " + (m==="test" ? "TEST" : "AUTO"), m==="test" ? "warn" : "ok");
-  if (m === "auto" && pin && Date.now() - demandeT > 3000){ pin = null; log("La carte est repassée en mode auto"); }
-  majBoutons();
-}
-function majStatut(d){
-  chip("c-carte", d.en_ligne ? "carte : en ligne" : "carte : hors ligne", d.en_ligne ? "ok" : "bad");
-  log(d.en_ligne ? "Carte connectée" : "Carte hors ligne");
-}
-function majAcces(d){
-  if (d.id !== monId || d.ok) return;
-  pin = null; log("Code PIN REFUSÉ"); majBoutons(); alert("Code PIN refusé");
-}
+// Un message « retenu » est une ancienne valeur gardée par le serveur :
+// il permet d'afficher tout de suite, mais ne prouve pas que la carte est vivante.
+function majEtat(d, retenu){
+  if (!retenu){ dernierVivant = Date.now(); marquerCarte(true); }
+  if (enLigne === false) return;
 
-// ---------- Connexion MQTT ----------
+  KEYS.forEach(k=>{
+    setCar(k, d[k]);
+    setPieton(k, d["p"+k]);
+    const actif = !!d["a"+k];
+    setBouton(k, actif);
+    if (actif && !appelsPrecedents[k] && !retenu) log("Appel piéton : " + BR[k].nom);
+    appelsPrecedents[k] = actif;
+  });
+
+  const noms = { nord:"nord", sud:"sud", est:"est", ouest:"ouest" };
+  let texte = "NORMAL", cls = "ok";
+  if (d.mode === "test"){ texte = "TEST"; cls = "warn"; }
+  if (d.mode === "urgence"){ texte = "URGENCE" + (noms[d.dir] ? " · " + noms[d.dir] : ""); cls = "urg"; }
+  chip("c-mode", "mode : " + texte, cls);
+  if (texte !== modePrecedent){
+    if (modePrecedent && !retenu) log("Mode : " + texte);
+    modePrecedent = texte;
+  }
+}
+function majStatut(d){ marquerCarte(!!d.en_ligne); }
+
+// La carte a pu disparaître sans que le serveur l'ait encore signalé
+setInterval(()=>{
+  if (client.connected && enLigne !== false && Date.now() - dernierVivant > DELAI_MUETTE) marquerCarte(false);
+}, 1000);
+
+// ---------- Plein écran ----------
+function majPlein(actif){
+  document.body.classList.toggle("plein", actif);
+  $("b-plein").textContent = actif ? "Quitter le plein écran" : "Plein écran";
+}
+$("b-plein").onclick = ()=>{
+  const actif = !document.body.classList.contains("plein");
+  majPlein(actif);
+  // Certains téléphones n'ont pas le plein écran navigateur : la mise en page suffit alors
+  const racine = document.documentElement;
+  if (actif && racine.requestFullscreen) racine.requestFullscreen().catch(()=>{});
+  if (!actif && document.fullscreenElement) document.exitFullscreen();
+};
+document.addEventListener("fullscreenchange", ()=>{ if (!document.fullscreenElement) majPlein(false); });
+
+// ---------- Connexion MQTT (lecture seule) ----------
 const client = mqtt.connect(BROKER);
 client.on("connect", ()=>{
-  connecte = true; chip("c-broker", "serveur : connecté", "ok");
-  client.subscribe([P+"etat", P+"statut", P+"acces"]);
-  majBoutons();
+  chip("c-broker", "serveur : connecté", "ok");
+  dernierVivant = Date.now();
+  client.subscribe([P+"etat", P+"statut"]);
 });
-client.on("close", ()=>{ connecte = false; chip("c-broker", "serveur : déconnecté", "bad"); majBoutons(); });
-client.on("message", (topic, payload)=>{
+client.on("close", ()=>{
+  chip("c-broker", "serveur : déconnecté", "bad");
+  chip("c-carte", "carte : ?");
+  enLigne = null;
+  effacerEtat();
+});
+client.on("message", (topic, payload, paquet)=>{
   let d; try { d = JSON.parse(payload.toString()); } catch(e){ return; }
+  if (!d || typeof d !== "object") return;
   const nom = topic.replace(P, "");
-  if (nom === "etat") majEtat(d);
+  if (nom === "etat") majEtat(d, paquet.retain);
   if (nom === "statut") majStatut(d);
-  if (nom === "acces") majAcces(d);
 });
-majBoutons();
 </script>
 </body>
 </html>
