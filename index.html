@@ -22,6 +22,12 @@ button{background:#f2a93b;color:#000;border:0;border-radius:8px;padding:6px 12px
 .pastille{width:14px;height:14px;border-radius:50%;flex:none}
 #log{list-style:none;padding:0;margin:8px 0 0;font-size:14px}
 #log li{padding:4px 0;border-bottom:1px solid #2f6a5a}
+.trafic{width:100%;border-collapse:collapse;margin:8px 0 6px;font-size:14px}
+.trafic th{text-align:left;font-weight:normal;color:#bfe6d0;padding:3px 0;border-bottom:1px solid #2f6a5a}
+.trafic td{padding:4px 0;border-bottom:1px solid #2f6a5a}
+.trafic td:not(:first-child),.trafic th:not(:first-child){text-align:right}
+.trafic .attente{color:#f39c12;font-weight:bold}
+#vert-info{margin:6px 0 14px;font-size:14px;padding:8px 10px;border-radius:8px;background:#12372E}
 #log:empty::before{content:"Aucun événement pour l'instant";color:#bfe6d0}
 /* Plein écran : uniquement le carrefour et le bandeau */
 body.plein{padding:8px 12px;height:100vh;height:100dvh;overflow:hidden;display:flex;flex-direction:column}
@@ -37,12 +43,17 @@ body.plein #scene{width:100%;height:100%}
 <div class="barre">
   <span id="c-broker" class="chip bad">serveur : déconnecté</span>
   <span id="c-carte" class="chip">carte : ?</span>
-  <span id="c-mode" class="chip">mode : ?</span>
-  <button id="b-plein" type="button">Plein écran</button>
+  <span id="c-mode" class="chip">mode : ?</span>  <button id="b-plein" type="button">Plein écran</button>
 </div>
 <div class="wrap">
   <div class="card"><svg id="scene" viewBox="0 0 600 600" role="img" aria-label="Vue du dessus du carrefour et état de ses feux"></svg></div>
   <div class="card side">
+    <b>Trafic</b>
+    <table class="trafic">
+      <thead><tr><th>Bras</th><th>En attente</th><th>Passées</th></tr></thead>
+      <tbody id="t-trafic"></tbody>
+    </table>
+    <div id="vert-info">–</div>
     <b>Légende</b>
     <ul class="legende">
       <li><span class="pastille" style="background:#e74c3c"></span>Rouge : arrêt</li>
@@ -108,11 +119,39 @@ Object.keys(BR).forEach(k=>{
     el("circle",{id:`B-${k}-${cote.n}`,cx:cote.boutonX,cy:195,r:7,fill:BOUTON_OFF,stroke:"#fff","stroke-width":1.5},g);
   });
 });
+// Étiquette de chaque bras : nom et voitures en attente
 Object.keys(BR).forEach(k=>{
   const b = BR[k];
-  el("rect",{x:b.cx-38,y:b.cy-14,width:76,height:28,rx:8,fill:"#12372E",opacity:.9,stroke:"#2FBF71"},svg);
-  const t = el("text",{x:b.cx,y:b.cy+5,fill:"#bfe6d0","font-size":14,"text-anchor":"middle"},svg); t.textContent = b.nom;
+  el("rect",{x:b.cx-50,y:b.cy-22,width:100,height:44,rx:8,fill:"#12372E",opacity:.9,stroke:"#2FBF71"},svg);
+  const t = el("text",{x:b.cx,y:b.cy-4,fill:"#bfe6d0","font-size":14,"text-anchor":"middle"},svg); t.textContent = b.nom;
+  const f = el("text",{id:`F-${k}`,x:b.cx,y:b.cy+14,fill:"#fff","font-size":13,"font-weight":"bold","text-anchor":"middle"},svg); f.textContent = "–";
 });
+
+// Tableau du trafic, dans l'ordre des aiguilles d'une montre
+["N","E","S","W"].forEach(k=>{
+  const tr = document.createElement("tr");
+  tr.innerHTML = `<td>${BR[k].nom}</td><td id="T-f-${k}">–</td><td id="T-d-${k}">–</td>`;
+  $("t-trafic").appendChild(tr);
+});
+function texteVoitures(n){ return n === 0 ? "aucune voiture" : n + (n > 1 ? " voitures" : " voiture"); }
+function setTrafic(k, file, passees){
+  const connu = typeof file === "number";
+  const e = $(`F-${k}`);
+  e.textContent = connu ? texteVoitures(file) : "–";
+  e.setAttribute("fill", connu && file > 0 ? col.orange : "#fff");
+  $(`T-f-${k}`).textContent = connu ? file : "–";
+  $(`T-f-${k}`).className = connu && file > 0 ? "attente" : "";
+  $(`T-d-${k}`).textContent = typeof passees === "number" ? passees : "–";
+}
+const AXES_VERTS = { NS_VERT:"Nord–Sud", EO_VERT:"Est–Ouest" };
+function texteVert(d){
+  const axe = AXES_VERTS[d.phase];
+  if (d.mode !== "normal") return "Mode " + d.mode + " : comptage seul, feux non adaptés.";
+  if (!axe) return "Changement d'axe en cours.";
+  if (!d.ad) return `Vert ${axe} : cycle normal (aucune voiture détectée).`;
+  if (d.obj > 0) return `Vert ${axe} adapté : ${d.passe}/${d.obj} voiture${d.obj > 1 ? "s" : ""} passée${d.passe > 1 ? "s" : ""} (au plus ${d.tmax} s).`;
+  return `Vert ${axe} court : des voitures attendent sur l'autre axe.`;
+}
 
 // « bleu » s'affiche sur la lampe verte, comme sur la maquette
 function lampe(id, c, etat){
@@ -129,7 +168,7 @@ function setBouton(k, actif){
   [1,2].forEach(n=> $(`B-${k}-${n}`).setAttribute("fill", actif ? col.orange : BOUTON_OFF));
 }
 function eteindre(){
-  KEYS.forEach(k=>{ setCar(k,""); setPieton(k,""); setBouton(k,false); });
+  KEYS.forEach(k=>{ setCar(k,""); setPieton(k,""); setBouton(k,false); setTrafic(k); });
 }
 
 // ---------- Interface ----------
@@ -145,6 +184,7 @@ let enLigne = null;      // null : encore inconnu
 let dernierVivant = 0;   // Dernier message reçu en direct de la carte
 let modePrecedent = "";
 let appelsPrecedents = {};
+let phasePrecedente = "";
 
 function marquerCarte(valeur){
   if (valeur === enLigne) return;
@@ -160,8 +200,10 @@ function marquerCarte(valeur){
 function effacerEtat(){
   eteindre();
   chip("c-mode", "mode : ?");
+  $("vert-info").textContent = "–";
   modePrecedent = "";
   appelsPrecedents = {};
+  phasePrecedente = "";
 }
 
 // ---------- Messages reçus de la carte ----------
@@ -178,7 +220,15 @@ function majEtat(d, retenu){
     setBouton(k, actif);
     if (actif && !appelsPrecedents[k] && !retenu) log("Appel piéton : " + BR[k].nom);
     appelsPrecedents[k] = actif;
+    setTrafic(k, d["f"+k], d["d"+k]);
   });
+
+  $("vert-info").textContent = texteVert(d);
+  if (d.phase !== phasePrecedente){
+    if (AXES_VERTS[d.phase] && d.ad && d.obj > 0 && !retenu)
+      log(`Vert ${AXES_VERTS[d.phase]} adapté : ${d.obj} voiture${d.obj > 1 ? "s" : ""} à faire passer`);
+    phasePrecedente = d.phase;
+  }
 
   const noms = { nord:"nord", sud:"sud", est:"est", ouest:"ouest" };
   let texte = "NORMAL", cls = "ok";
